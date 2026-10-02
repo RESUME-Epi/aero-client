@@ -414,6 +414,7 @@ Lists notification types with their data id and registered objects.
 
 ```sh
 aero types
+aero types traffic
 aero types --json
 ```
 
@@ -425,6 +426,23 @@ traffic (no-copy)
 ```
 
 The data id shown here is what an analysis `input_data` entry should reference.
+
+### Removing a url
+
+`--remove-url` detaches one object or pattern from a type:
+
+```sh
+aero types traffic --remove-url http://minio.internal:9000/traffic/a.xml.gz
+```
+
+The type keeps its data id, its version history and every flow registered against it; only the
+matching rule goes, and the key is then free for another type to claim. Give the url in whatever
+form is to hand — a presigned one resolves to the same object.
+
+A type with no urls left can no longer be reached by notify at all: resolution falls back to
+untyped sources only, so `POST /data/notify` 404s even though the source's own url is unchanged.
+For a no-copy source, where notify is the only way a version is ever recorded, that stops
+ingestion until a url is added back with `aero create --type traffic --url ...`.
 
 ---
 

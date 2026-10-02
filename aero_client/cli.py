@@ -176,6 +176,17 @@ def main():
     )
 
     types_parser.add_argument(
+        "name", nargs="?", type=str, help="Show only this type"
+    )
+    types_parser.add_argument(
+        "--remove-url",
+        type=str,
+        metavar="URL",
+        help="Remove this url from the named type. The type keeps its data id, "
+        "versions and flows; a type left with no urls can no longer be reached "
+        "by notify.",
+    )
+    types_parser.add_argument(
         "--json", action="store_true", help="Emit raw JSON instead of a summary"
     )
 
@@ -407,9 +418,24 @@ def main():
             print(f'      {{"<name>": {{"id": "{source_id}", "version": null}}}}')
 
     elif args.command == "types":
+        from aero_client.api import delete_type_url
+        from aero_client.api import get_source_type
         from aero_client.api import list_source_types
 
-        types = list_source_types()
+        if args.remove_url:
+            if args.name is None:
+                parser.error(
+                    "--remove-url needs the name of the type to remove it from"
+                )
+            types = [delete_type_url(args.name, args.remove_url)]
+        elif args.name:
+            one = get_source_type(args.name)
+            if one is None:
+                parser.error(f"Source type '{args.name}' not found.")
+            types = [one]
+        else:
+            types = list_source_types()
+
         if args.json:
             print(json.dumps(types, indent=4))
         elif not types:
@@ -428,6 +454,11 @@ def main():
                         else "object "
                     )
                     print(f"    {kind}  {u['url']}")
+
+                if not t.get("urls"):
+                    # Notify resolves on the registered urls and falls back only
+                    # to untyped sources, so there is now no way to reach this one.
+                    print("    no urls: notify can no longer resolve this type")
 
     elif args.command == "delete-flows":
         from aero_client.api import delete_data_flows
