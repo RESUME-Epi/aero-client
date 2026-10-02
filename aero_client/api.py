@@ -308,6 +308,24 @@ def add_type_url(name: str, url: str) -> dict:
     raise ClientError(response.status_code, response.content)
 
 
+def delete_type_url(name: str, url: str) -> dict:
+    """Remove one url from a type and return the type as it now stands.
+
+    The type, its Data UUID and every flow registered against it stay in place.
+    A type left with no urls cannot be reached by notify at all, so for a no-copy
+    source nothing more is ingested until a url is added back.
+    """
+    response = requests.delete(
+        build_url("data", "types", name, "urls"),
+        headers={"Authorization": f"Bearer {AUTH_ACCESS_TOKEN}"},
+        params={"url": url},
+        verify=False,
+    )
+    if response.status_code == 200:
+        return response.json()
+    raise ClientError(response.status_code, response.content)
+
+
 def create_data_source(
     name: str,
     url: str,
