@@ -37,6 +37,9 @@ def main():
     )
     search_parser = subparsers.add_parser("search", help="Search sources")
     register_parser = subparsers.add_parser("register", help="Register analysis flow")
+    run_parser = subparsers.add_parser(
+        "run", help="Run an analysis flow now, on the data it already has"
+    )
     config_parser = subparsers.add_parser("configure", help="Configure the client")
     _ = subparsers.add_parser("logout", help="Log out of Globus auth")
 
@@ -242,6 +245,50 @@ def main():
     )
     register_parser.add_argument(
         "-d", "--description", type=str, default=None, help="Description of task"
+    )
+
+    run_parser.add_argument(
+        "flow_id", type=str, help="Flow uuid to run (see `aero list -t flow`)"
+    )
+    run_parser.add_argument(
+        "-f",
+        "--force",
+        action="store_true",
+        help="Run even though no input has a version newer than the flow's "
+        "last_executed. What you want after a failed run, which moved "
+        "last_executed past the data it was meant to process.",
+    )
+    run_parser.add_argument(
+        "-u",
+        "--url",
+        type=str,
+        default=None,
+        help="Read a no-copy input from this url for this run -- a presigned "
+        "GET for an object on a private bucket. Which input it belongs to is "
+        "worked out from the flow; add --source-data-id if that is ambiguous.",
+    )
+    run_parser.add_argument(
+        "--trigger-url",
+        type=str,
+        default=None,
+        help="The stable registered url of a no-copy input, set by hand instead "
+        "of resolved from --url. Needs --source-data-id.",
+    )
+    run_parser.add_argument(
+        "--signed-url",
+        type=str,
+        default=None,
+        help="Presigned form of --trigger-url, set by hand instead of resolved "
+        "from --url. Requires --trigger-url and --source-data-id.",
+    )
+    run_parser.add_argument(
+        "--source-data-id",
+        type=str,
+        default=None,
+        help="Data uuid the --trigger-url belongs to",
+    )
+    run_parser.add_argument(
+        "--json", action="store_true", help="Emit raw JSON instead of a summary"
     )
 
     config_parser.add_argument(
@@ -589,6 +636,70 @@ def main():
                 "records the run and its inputs but tracks no output version.\n"
                 "Nothing can be registered downstream of it."
             )
+
+    elif args.command == "run":
+        from aero_client.api import resolve_no_copy_input
+        from aero_client.api import run_flow
+
+        trigger_url = args.trigger_url
+        signed_url = args.signed_url
+        source_data_id = args.source_data_id
+
+        if args.url and (args.trigger_url or args.signed_url):
+            parser.error(
+                "--url supplies both the stable and the fetch url; use "
+                "--trigger-url/--signed-url only to set them apart by hand"
+            )
+
+        if args.url:
+            # The worker fetches the signed url but names the temp file after the
+            # stable one, so the object keeps its extension -- resolving gets the
+            # registered url for that, from a url that may be presigned.
+            try:
+                source_data_id, trigger_url = resolve_no_copy_input(
+                    args.flow_id, args.url, args.source_data_id
+                )
+            except ValueError as e:
+                parser.error(str(e))
+            signed_url = args.url
+        elif (trigger_url or signed_url) and not (trigger_url and source_data_id):
+            # The server injects a per-run url only when it knows which input it
+            # belongs to, and only alongside trigger_url -- a signed url on its
+            # own is accepted and then quietly dropped, so refuse it here.
+            parser.error(
+                "--trigger-url and --source-data-id must be given together "
+                "(--signed-url needs both); otherwise the server ignores them. "
+                "Pass --url instead to have them worked out for you."
+            )
+
+        result = run_flow(
+            args.flow_id,
+            force=args.force,
+            trigger_url=trigger_url,
+            signed_url=signed_url,
+            source_data_id=source_data_id,
+        )
+
+        if args.json:
+            print(json.dumps(result, indent=4))
+        elif result.get("submitted"):
+            flow = result.get("flow") or {}
+            print(f"Submitted a run of flow {args.flow_id}.")
+            if trigger_url:
+                print(f"  input {source_data_id} read from {trigger_url}")
+            print(f"  last_executed: {flow.get('last_executed')}")
+            print(
+                "\nSubmitted, not finished: the run is now with Globus. Watch "
+                "for the output version with `aero list -i <output data id>`."
+            )
+        else:
+            reason = result.get("reason") or ""
+            print(f"Nothing was submitted for flow {args.flow_id}.")
+            print(f"  {reason}")
+            # Staleness is the only thing force overrides; suggesting it for a
+            # missing version would just send someone round the same loop.
+            if not args.force and "no input newer than" in reason:
+                print("\nRe-run with --force to run it anyway.")
 
     elif args.command == "configure":
         profile = args.profile or os.environ.get("AERO_PROFILE", "default")

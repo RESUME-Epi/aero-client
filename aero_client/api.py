@@ -3,6 +3,7 @@
 import json
 import logging
 import requests
+import urllib.parse
 
 from pathlib import Path
 from typing import Generator
@@ -547,6 +548,163 @@ def get_flow(flow_id: str, inputs_only: bool = True) -> dict:
         return response.json()["function_args"]["kwargs"]
     else:
         return response.json()
+
+
+def _object_key(url: str) -> str:
+    """Reduce an object url (or a bare ``bucket/key``) to a stable ``bucket/key``.
+
+    Mirrors how the server normalizes a notify identity: scheme, host, port and
+    query string all go, so a presigned url, a plain url and a bare key for the
+    same object compare equal.
+    """
+    parsed = urllib.parse.urlparse(url)
+    path = parsed.path if parsed.scheme else url
+    return path.strip("/")
+
+
+def _without_query(url: str) -> str:
+    """``url`` with any signing parameters removed."""
+    parsed = urllib.parse.urlparse(url)
+    if not parsed.scheme:
+        return url
+    return parsed._replace(query="", fragment="").geturl()
+
+
+def resolve_no_copy_input(
+    flow_id: str, url: str, source_data_id: str | None = None
+) -> tuple[str, str]:
+    """Work out which of a flow's no-copy inputs ``url`` refers to.
+
+    Returns that input's data uuid and its **registered** url. The registered one
+    is the stable identity: it names the temp file the worker writes, so the
+    object keeps its own name and extension, and it is what the function receives
+    as ``<name>_url``. The url passed in here is the transient one to fetch with,
+    and stays the caller's ``signed_url``.
+
+    Matching is on object identity (``bucket/key``), so a presigned url matches
+    the plain registered form, and a host rewritten by a tunnel still matches. A
+    typed source is matched on any of its registered urls, not only the one on its
+    Data row -- a type binds many objects to one data id.
+
+    Glob patterns are not expanded. A type that registers its objects by pattern
+    has no concrete url to compare against, so name the input with
+    ``source_data_id`` instead.
+
+    Raises:
+        ValueError: when the url matches no no-copy input of this flow, or more
+            than one, naming the candidates either way.
+    """
+    try:
+        flow = get_flow(flow_id, inputs_only=False)
+    except AssertionError as e:  # get_flow asserts rather than raising ClientError
+        raise ValueError(f"could not read flow {flow_id}: {e}") from e
+
+    no_copy = [d for d in (flow.get("derived_from") or []) if d.get("no_copy")]
+    if not no_copy:
+        raise ValueError(
+            f"flow {flow_id} has no no-copy inputs, so there is nothing for a url "
+            "to point at; it reads its inputs from a Globus collection"
+        )
+
+    types_by_data: dict[str, list[dict]] = {}
+    for t in list_source_types():
+        types_by_data.setdefault(str(t["data_id"]), []).extend(t.get("urls") or [])
+
+    # Each input's registered urls, keyed by object identity: its own, plus every
+    # url of the type it belongs to -- Data.url holds only the first of those.
+    registered: dict[str, dict[str, str]] = {}
+    for d in no_copy:
+        data_id = str(d["id"])
+        urls = {_object_key(d["url"]): d["url"]} if d.get("url") else {}
+        for u in types_by_data.get(data_id, []):
+            urls[u["object_key"]] = u["url"]
+        registered[data_id] = urls
+
+    target = _object_key(url)
+
+    if source_data_id is not None:
+        named = str(source_data_id)
+        if named not in registered:
+            raise ValueError(
+                f"{named} is not a no-copy input of flow {flow_id}; its no-copy "
+                f"inputs are {', '.join(registered) or 'none'}"
+            )
+        # An unrecognized key is taken at face value when the input was named
+        # explicitly -- the caller may be reaching an object the type does not
+        # list yet, and has already said which input it belongs to.
+        return named, registered[named].get(target) or _without_query(url)
+
+    matches = [d for d, urls in registered.items() if target in urls]
+    if len(matches) == 1:
+        return matches[0], registered[matches[0]][target]
+
+    candidates = "; ".join(
+        f"{d} ({', '.join(sorted(urls)) or 'no concrete registered urls'})"
+        for d, urls in registered.items()
+    )
+    if not matches:
+        raise ValueError(
+            f"'{url}' matches no registered url of a no-copy input of flow "
+            f"{flow_id}. Its no-copy inputs are: {candidates}. "
+            "Pass --source-data-id to name the one you mean."
+        )
+    raise ValueError(
+        f"'{url}' matches {len(matches)} no-copy inputs of flow {flow_id} "
+        f"({', '.join(matches)}). Pass --source-data-id to name the one you mean."
+    )
+
+
+def run_flow(
+    flow_id: str,
+    force: bool = False,
+    trigger_url: str | None = None,
+    signed_url: str | None = None,
+    source_data_id: str | None = None,
+) -> dict:
+    """Run an analysis flow now, on the data it already has.
+
+    For re-running an analysis whose last run failed, rather than waiting for an
+    input to get a new version.
+
+    ``force`` runs it even though no input is newer than the flow's
+    ``last_executed`` -- which is the point after a failure, since the run that
+    failed moved ``last_executed`` past the data it was meant to process. It does
+    not override the requirement that every input have a version.
+
+    ``trigger_url`` and ``source_data_id`` must be given together, and name the
+    no-copy input to read by url for this run; ``signed_url`` is the presigned
+    form for a private object. The server drops all three unless the first two
+    are both present.
+
+    Only ``ANY``/``ALL`` flows can be run this way -- the ingestion policies are
+    driven by a timer or the notify webhook, and the server rejects them with a
+    400.
+
+    Returns:
+        dict: ``submitted`` (whether a run was actually handed to Globus),
+        ``reason`` (why not, when it wasn't) and ``flow`` (the flow as it now
+        stands).
+    """
+    payload: dict = {"force": force}
+    if trigger_url is not None:
+        payload["trigger_url"] = trigger_url
+    if signed_url is not None:
+        payload["signed_url"] = signed_url
+    if source_data_id is not None:
+        payload["source_data_id"] = str(source_data_id)
+
+    response = requests.post(
+        build_url("flow", flow_id, "run"),
+        headers={
+            "Authorization": f"Bearer {AUTH_ACCESS_TOKEN}",
+            "Content-type": "application/json",
+        },
+        data=json.dumps(payload),
+        verify=False,
+    )
+    if response.status_code == 200:
+        return response.json()
+    raise ClientError(response.status_code, response.content)
 
 
 # TODO: Fix bug where it'll request to login if tokens are not present
