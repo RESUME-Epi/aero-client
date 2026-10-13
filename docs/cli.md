@@ -12,6 +12,7 @@ aero [-l LEVEL] <command> [options]
 | [`list`](#aero-list) | List sources, flows, provenance, or one source's versions |
 | [`create`](#aero-create) | Register a data source |
 | [`register`](#aero-register) | Register an analysis flow |
+| [`run`](#aero-run) | Run an analysis flow now, without waiting for new data |
 | [`types`](#aero-types) | List notification types and their data ids |
 | [`delete-flows`](#aero-delete-flows) | Delete the flows attached to a source |
 | [`search`](#aero-search) | Query the Globus Search index |
@@ -400,11 +401,102 @@ things delay that, and neither is a failure:
 
 Either way a freshly registered flow can sit at `last_executed: null` for a while.
 
+To run one without waiting for either condition, see [`aero run`](#aero-run).
+
 ### Already exists?
 
 Registration deduplicates on a hash of the function, inputs, outputs and kwargs. Re-registering an
 identical flow returns `501 Flow already exists`. Change something, or remove the old one with
 [`delete-flows`](#aero-delete-flows).
+
+---
+
+## `aero run`
+
+Runs an analysis flow now, on the data it already has — for when a run failed and you want it
+again on the same inputs rather than waiting for the next version of one.
+
+```sh
+aero run f9aaedb0-2f23-42e3-bb69-0bc4dce4d7b2
+aero run f9aaedb0-... --force
+aero run f9aaedb0-... --json
+```
+
+The flow uuid comes from `aero list -t flow`, or from the preview `aero delete-flows` prints.
+
+| Flag | |
+|---|---|
+| `-f, --force` | Run even though no input is newer than `last_executed` |
+| `--trigger-url` | Url to read one no-copy input from for this run |
+| `--signed-url` | Presigned form of `--trigger-url`, for a private object |
+| `--source-data-id` | Data uuid the `--trigger-url` belongs to |
+| `--json` | Emit the raw server response |
+
+!!! note "`-f` is not `--file` here"
+
+    On [`create`](#aero-create) and [`register`](#aero-register), `-f` is `--file`. On `run` there
+    is no file to load, and `-f` is `--force`.
+
+### Submitted, or not
+
+The command always reaches the server; whether a *run* happened is the thing to read. When the
+gate declines, it says why rather than failing:
+
+```
+Nothing was submitted for flow f9aaedb0-2f23-42e3-bb69-0bc4dce4d7b2.
+  no input newer than last_executed=2026-10-13 12:00:00+00:00 (input latest versions: {...})
+
+Re-run with --force to run it anyway.
+```
+
+```
+Submitted a run of flow f9aaedb0-2f23-42e3-bb69-0bc4dce4d7b2.
+  last_executed: 2026-10-13T14:22:07.113402Z
+
+Submitted, not finished: the run is now with Globus. Watch for the output version with
+`aero list -i <output data id>`.
+```
+
+### What `--force` does and doesn't override
+
+`--force` skips the [policy gate](#when-a-flow-runs) — the test that at least one input (`ANY`) or
+every input (`ALL`) has a version newer than `last_executed`. That is exactly what a failed run
+breaks: `last_executed` is stamped when the run is *submitted*, not when it succeeds, so a run that
+died still moved the flow past the data it was meant to process. Without `--force` that data looks
+old forever and the flow never picks it up again.
+
+It does **not** override the requirement that every input have a version at all. A source that was
+registered and never notified has none, the run would fail with
+`No versions exist for this data ID`, and the command says so instead — forcing again changes
+nothing. Nor does a flow with no inputs run.
+
+Note that a forced run stamps `last_executed` again, whether or not it goes on to succeed.
+
+### Which flows
+
+`ANY` and `ALL` only. The ingestion policies are rejected with a `400`: `INGESTION` and `TIMER` are
+driven by a Globus timer, and re-running them through this route would register a second one;
+`INGESTION_EVENT` runs from the notify webhook, which carries a per-run source url that a manual
+call has no way to supply. To re-ingest one of those, send its notify again.
+
+### Re-running an analysis over a private no-copy input
+
+A [no-copy](#a-no-copy-source) input is read from the object store by url, and on a private bucket
+that needs the presigned url the relay normally supplies with the notify. There is no notify behind
+a manual run, so pass it yourself — all three flags together, naming which input it belongs to:
+
+```sh
+aero run f9aaedb0-... --force \
+  --source-data-id 6f76e7b5-0f1d-4b4d-9769-e8b85dca5266 \
+  --trigger-url 'http://minio.internal:9000/traffic/a.xml.gz' \
+  --signed-url 'http://minio.internal:9000/traffic/a.xml.gz?X-Amz-Signature=...'
+```
+
+The server applies a url only when it knows which input it belongs to, so `--signed-url` on its own
+would be accepted and then silently dropped — the client refuses that combination instead. Omit
+them and the run proceeds the way the registration-time run does for such an input: unsigned, and
+`403` on a private object. An input marked [`fetch: false`](#fetching-an-input-yourself) needs none
+of this, since your function retrieves the object itself.
 
 ---
 

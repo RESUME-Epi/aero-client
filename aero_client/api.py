@@ -549,6 +549,59 @@ def get_flow(flow_id: str, inputs_only: bool = True) -> dict:
         return response.json()
 
 
+def run_flow(
+    flow_id: str,
+    force: bool = False,
+    trigger_url: str | None = None,
+    signed_url: str | None = None,
+    source_data_id: str | None = None,
+) -> dict:
+    """Run an analysis flow now, on the data it already has.
+
+    For re-running an analysis whose last run failed, rather than waiting for an
+    input to get a new version.
+
+    ``force`` runs it even though no input is newer than the flow's
+    ``last_executed`` -- which is the point after a failure, since the run that
+    failed moved ``last_executed`` past the data it was meant to process. It does
+    not override the requirement that every input have a version.
+
+    ``trigger_url`` and ``source_data_id`` must be given together, and name the
+    no-copy input to read by url for this run; ``signed_url`` is the presigned
+    form for a private object. The server drops all three unless the first two
+    are both present.
+
+    Only ``ANY``/``ALL`` flows can be run this way -- the ingestion policies are
+    driven by a timer or the notify webhook, and the server rejects them with a
+    400.
+
+    Returns:
+        dict: ``submitted`` (whether a run was actually handed to Globus),
+        ``reason`` (why not, when it wasn't) and ``flow`` (the flow as it now
+        stands).
+    """
+    payload: dict = {"force": force}
+    if trigger_url is not None:
+        payload["trigger_url"] = trigger_url
+    if signed_url is not None:
+        payload["signed_url"] = signed_url
+    if source_data_id is not None:
+        payload["source_data_id"] = str(source_data_id)
+
+    response = requests.post(
+        build_url("flow", flow_id, "run"),
+        headers={
+            "Authorization": f"Bearer {AUTH_ACCESS_TOKEN}",
+            "Content-type": "application/json",
+        },
+        data=json.dumps(payload),
+        verify=False,
+    )
+    if response.status_code == 200:
+        return response.json()
+    raise ClientError(response.status_code, response.content)
+
+
 # TODO: Fix bug where it'll request to login if tokens are not present
 def globus_logout():
     """Remove the Globus Auth token file to invoke login on next API access."""
