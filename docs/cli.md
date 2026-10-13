@@ -427,9 +427,10 @@ The flow uuid comes from `aero list -t flow`, or from the preview `aero delete-f
 | Flag | |
 |---|---|
 | `-f, --force` | Run even though no input is newer than `last_executed` |
-| `--trigger-url` | Url to read one no-copy input from for this run |
-| `--signed-url` | Presigned form of `--trigger-url`, for a private object |
-| `--source-data-id` | Data uuid the `--trigger-url` belongs to |
+| `-u, --url` | Read a no-copy input from this url for this run |
+| `--source-data-id` | Which no-copy input the url is for, when that is ambiguous |
+| `--trigger-url` | Stable url, set by hand rather than resolved from `--url` |
+| `--signed-url` | Fetch url, set by hand. Needs `--trigger-url` and `--source-data-id` |
 | `--json` | Emit the raw server response |
 
 !!! note "`-f` is not `--file` here"
@@ -479,24 +480,65 @@ driven by a Globus timer, and re-running them through this route would register 
 `INGESTION_EVENT` runs from the notify webhook, which carries a per-run source url that a manual
 call has no way to supply. To re-ingest one of those, send its notify again.
 
-### Re-running an analysis over a private no-copy input
+### Re-running an analysis over a no-copy input
 
 A [no-copy](#a-no-copy-source) input is read from the object store by url, and on a private bucket
 that needs the presigned url the relay normally supplies with the notify. There is no notify behind
-a manual run, so pass it yourself — all three flags together, naming which input it belongs to:
+a manual run, so pass one yourself with `--url`:
+
+```sh
+aero run f9aaedb0-... --force \
+  --url 'http://minio.internal:9000/traffic/a.xml.gz?X-Amz-Signature=...'
+```
+
+```
+Submitted a run of flow f9aaedb0-2f23-42e3-bb69-0bc4dce4d7b2.
+  input 6f76e7b5-0f1d-4b4d-9769-e8b85dca5266 read from http://minio.internal:9000/traffic/a.xml.gz
+```
+
+Omit it and the run goes the way the registration-time run does for such an input: unsigned, and
+`403` on a private object. An input marked [`fetch: false`](#fetching-an-input-yourself) needs none
+of this, since your function retrieves the object itself.
+
+#### What `--url` works out for you
+
+The run needs two urls and they are not the same thing. The **stable** one identifies the object:
+it names the temp file the worker writes, so the object keeps its extension, and it is what your
+function receives as `<name>_url`. The **fetch** one is the presigned url, valid for minutes. Given
+`--url`, the client reads the flow, finds which no-copy input that object belongs to, and sends the
+registered url as the stable one and what you passed as the fetch one.
+
+Matching is on object identity — `bucket/key`, with scheme, host, port and query string dropped —
+so a presigned url matches its plain registered form, and a host rewritten by a tunnel
+(`localhost:9000` for `minio.internal:9000`) still resolves. A [typed](#aero-types) source matches
+on any of its registered urls, not just the one on its data row.
+
+#### When it can't tell
+
+If the url matches no no-copy input of the flow, or more than one, nothing is submitted and the
+candidates are named:
+
+```
+aero run: error: 'http://minio.internal:9000/other/z.gz' matches no registered url of a no-copy
+input of flow f9aaedb0-.... Its no-copy inputs are: 6f76e7b5-... (traffic/a.xml.gz).
+Pass --source-data-id to name the one you mean.
+```
+
+`--source-data-id` settles it, and is also the way to reach an object a type matches by
+[glob](#matching-objects-with-a-glob) — a pattern lists no concrete url to compare against. Naming
+the input is taken as your assertion that the url belongs to it, so the url is used as given, minus
+its signing parameters:
 
 ```sh
 aero run f9aaedb0-... --force \
   --source-data-id 6f76e7b5-0f1d-4b4d-9769-e8b85dca5266 \
-  --trigger-url 'http://minio.internal:9000/traffic/a.xml.gz' \
-  --signed-url 'http://minio.internal:9000/traffic/a.xml.gz?X-Amz-Signature=...'
+  --url 'http://minio.internal:9000/traffic/2026-10-13/a.xml.gz?X-Amz-Signature=...'
 ```
 
-The server applies a url only when it knows which input it belongs to, so `--signed-url` on its own
-would be accepted and then silently dropped — the client refuses that combination instead. Omit
-them and the run proceeds the way the registration-time run does for such an input: unsigned, and
-`403` on a private object. An input marked [`fetch: false`](#fetching-an-input-yourself) needs none
-of this, since your function retrieves the object itself.
+`--trigger-url` and `--signed-url` set the two by hand and skip the lookup entirely; they must be
+given with `--source-data-id`, since the server applies a url only when it knows which input it
+belongs to — a signed url on its own is accepted and then silently dropped. They cannot be combined
+with `--url`.
 
 ---
 

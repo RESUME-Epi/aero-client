@@ -259,18 +259,27 @@ def main():
         "last_executed past the data it was meant to process.",
     )
     run_parser.add_argument(
+        "-u",
+        "--url",
+        type=str,
+        default=None,
+        help="Read a no-copy input from this url for this run -- a presigned "
+        "GET for an object on a private bucket. Which input it belongs to is "
+        "worked out from the flow; add --source-data-id if that is ambiguous.",
+    )
+    run_parser.add_argument(
         "--trigger-url",
         type=str,
         default=None,
-        help="Url to read one no-copy input from for this run. Needs "
-        "--source-data-id naming which input it belongs to.",
+        help="The stable registered url of a no-copy input, set by hand instead "
+        "of resolved from --url. Needs --source-data-id.",
     )
     run_parser.add_argument(
         "--signed-url",
         type=str,
         default=None,
-        help="Presigned form of --trigger-url, for an object on a private "
-        "bucket. Requires --trigger-url and --source-data-id.",
+        help="Presigned form of --trigger-url, set by hand instead of resolved "
+        "from --url. Requires --trigger-url and --source-data-id.",
     )
     run_parser.add_argument(
         "--source-data-id",
@@ -629,25 +638,46 @@ def main():
             )
 
     elif args.command == "run":
+        from aero_client.api import resolve_no_copy_input
         from aero_client.api import run_flow
 
-        # The server injects a per-run url only when it knows which input it
-        # belongs to, and only alongside trigger_url -- a signed url on its own
-        # is accepted and then quietly dropped, so refuse it here instead.
-        if (args.trigger_url or args.signed_url) and not (
-            args.trigger_url and args.source_data_id
-        ):
+        trigger_url = args.trigger_url
+        signed_url = args.signed_url
+        source_data_id = args.source_data_id
+
+        if args.url and (args.trigger_url or args.signed_url):
+            parser.error(
+                "--url supplies both the stable and the fetch url; use "
+                "--trigger-url/--signed-url only to set them apart by hand"
+            )
+
+        if args.url:
+            # The worker fetches the signed url but names the temp file after the
+            # stable one, so the object keeps its extension -- resolving gets the
+            # registered url for that, from a url that may be presigned.
+            try:
+                source_data_id, trigger_url = resolve_no_copy_input(
+                    args.flow_id, args.url, args.source_data_id
+                )
+            except ValueError as e:
+                parser.error(str(e))
+            signed_url = args.url
+        elif (trigger_url or signed_url) and not (trigger_url and source_data_id):
+            # The server injects a per-run url only when it knows which input it
+            # belongs to, and only alongside trigger_url -- a signed url on its
+            # own is accepted and then quietly dropped, so refuse it here.
             parser.error(
                 "--trigger-url and --source-data-id must be given together "
-                "(--signed-url needs both); otherwise the server ignores them"
+                "(--signed-url needs both); otherwise the server ignores them. "
+                "Pass --url instead to have them worked out for you."
             )
 
         result = run_flow(
             args.flow_id,
             force=args.force,
-            trigger_url=args.trigger_url,
-            signed_url=args.signed_url,
-            source_data_id=args.source_data_id,
+            trigger_url=trigger_url,
+            signed_url=signed_url,
+            source_data_id=source_data_id,
         )
 
         if args.json:
@@ -655,6 +685,8 @@ def main():
         elif result.get("submitted"):
             flow = result.get("flow") or {}
             print(f"Submitted a run of flow {args.flow_id}.")
+            if trigger_url:
+                print(f"  input {source_data_id} read from {trigger_url}")
             print(f"  last_executed: {flow.get('last_executed')}")
             print(
                 "\nSubmitted, not finished: the run is now with Globus. Watch "

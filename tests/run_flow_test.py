@@ -125,6 +125,149 @@ def test_run_flow_raises_on_an_error_response(api, monkeypatch):
 
 
 # --------------------------------------------------------------------------
+# resolving which no-copy input a url belongs to
+# --------------------------------------------------------------------------
+
+
+OTHER_DATA_ID = "2b1f3c44-9a7e-4a1b-8a0f-7c5d2e9b4a31"
+PLAIN_URL = "http://minio.internal:9000/traffic/a.xml.gz"
+PRESIGNED = PLAIN_URL + "?X-Amz-Signature=abc&X-Amz-Expires=600"
+
+
+def _stub_flow(api, monkeypatch, inputs, types=()):
+    monkeypatch.setattr(
+        api, "get_flow", lambda flow_id, inputs_only=True: {"derived_from": inputs}
+    )
+    monkeypatch.setattr(api, "list_source_types", lambda: list(types))
+
+
+def test_a_presigned_url_resolves_to_its_registered_form(api, monkeypatch):
+    """The stable url names the worker's temp file; signing params must not reach it."""
+    _stub_flow(api, monkeypatch, [{"id": DATA_ID, "no_copy": True, "url": PLAIN_URL}])
+
+    data_id, trigger_url = api.resolve_no_copy_input(FLOW_ID, PRESIGNED)
+
+    assert data_id == DATA_ID
+    assert trigger_url == PLAIN_URL
+
+
+def test_a_typed_source_matches_on_any_of_its_urls(api, monkeypatch):
+    """Data.url holds only the first url of a type; the rest live on the type."""
+    second = "http://minio.internal:9000/traffic/b.xml.gz"
+    _stub_flow(
+        api,
+        monkeypatch,
+        [{"id": DATA_ID, "no_copy": True, "url": PLAIN_URL}],
+        types=[
+            {
+                "name": "traffic",
+                "data_id": DATA_ID,
+                "urls": [
+                    {"url": PLAIN_URL, "object_key": "traffic/a.xml.gz"},
+                    {"url": second, "object_key": "traffic/b.xml.gz"},
+                ],
+            }
+        ],
+    )
+
+    data_id, trigger_url = api.resolve_no_copy_input(
+        FLOW_ID, second + "?X-Amz-Signature=xyz"
+    )
+
+    assert (data_id, trigger_url) == (DATA_ID, second)
+
+
+def test_a_rewritten_host_still_matches(api, monkeypatch):
+    """Matching is on bucket/key, so a tunnel or a container name resolves the same."""
+    _stub_flow(api, monkeypatch, [{"id": DATA_ID, "no_copy": True, "url": PLAIN_URL}])
+
+    data_id, trigger_url = api.resolve_no_copy_input(
+        FLOW_ID, "http://localhost:9000/traffic/a.xml.gz?X-Amz-Signature=abc"
+    )
+
+    assert (data_id, trigger_url) == (DATA_ID, PLAIN_URL)
+
+
+def test_copy_inputs_are_not_candidates(api, monkeypatch):
+    _stub_flow(
+        api,
+        monkeypatch,
+        [{"id": DATA_ID, "no_copy": False, "url": PLAIN_URL}],
+    )
+
+    with pytest.raises(ValueError, match="no no-copy inputs"):
+        api.resolve_no_copy_input(FLOW_ID, PRESIGNED)
+
+
+def test_an_unmatched_url_names_the_candidates(api, monkeypatch):
+    _stub_flow(api, monkeypatch, [{"id": DATA_ID, "no_copy": True, "url": PLAIN_URL}])
+
+    with pytest.raises(ValueError) as e:
+        api.resolve_no_copy_input(FLOW_ID, "http://minio.internal:9000/other/z.gz")
+
+    assert DATA_ID in str(e.value)
+    assert "traffic/a.xml.gz" in str(e.value)
+    assert "--source-data-id" in str(e.value)
+
+
+def test_two_inputs_on_the_same_object_are_ambiguous(api, monkeypatch):
+    """Two no-copy inputs can register the same object; the url cannot pick one."""
+    _stub_flow(
+        api,
+        monkeypatch,
+        [
+            {"id": DATA_ID, "no_copy": True, "url": PLAIN_URL},
+            {"id": OTHER_DATA_ID, "no_copy": True, "url": PLAIN_URL},
+        ],
+    )
+
+    with pytest.raises(ValueError, match="matches 2 no-copy inputs"):
+        api.resolve_no_copy_input(FLOW_ID, PRESIGNED)
+
+
+def test_an_explicit_source_data_id_settles_it(api, monkeypatch):
+    _stub_flow(
+        api,
+        monkeypatch,
+        [
+            {"id": DATA_ID, "no_copy": True, "url": PLAIN_URL},
+            {"id": OTHER_DATA_ID, "no_copy": True, "url": PLAIN_URL},
+        ],
+    )
+
+    data_id, trigger_url = api.resolve_no_copy_input(
+        FLOW_ID, PRESIGNED, source_data_id=OTHER_DATA_ID
+    )
+
+    assert (data_id, trigger_url) == (OTHER_DATA_ID, PLAIN_URL)
+
+
+def test_an_unlisted_object_under_an_explicit_input_is_taken_at_face_value(
+    api, monkeypatch
+):
+    """Naming the input is the caller asserting the url belongs to it.
+
+    A type registered by glob lists no concrete url to match, so this is the only
+    way to reach one of its objects.
+    """
+    _stub_flow(api, monkeypatch, [{"id": DATA_ID, "no_copy": True, "url": None}])
+
+    data_id, trigger_url = api.resolve_no_copy_input(
+        FLOW_ID, PRESIGNED, source_data_id=DATA_ID
+    )
+
+    assert data_id == DATA_ID
+    assert trigger_url == PLAIN_URL  # query stripped
+
+
+def test_an_input_outside_the_flow_is_refused(api, monkeypatch):
+    _stub_flow(api, monkeypatch, [{"id": DATA_ID, "no_copy": True, "url": PLAIN_URL}])
+
+    with pytest.raises(ValueError, match="is not a no-copy input"):
+        api.resolve_no_copy_input(FLOW_ID, PRESIGNED, source_data_id=OTHER_DATA_ID)
+
+
+# --------------------------------------------------------------------------
 # the cli
 # --------------------------------------------------------------------------
 
@@ -222,6 +365,46 @@ def test_a_trigger_url_without_its_input_is_refused(cli, capsys):
         cli(["run", FLOW_ID, "--trigger-url", "http://minio/a"])
 
     assert "must be given together" in capsys.readouterr().err
+
+
+def test_url_resolves_the_input_and_splits_stable_from_signed(cli, api, monkeypatch):
+    """`--url` is the whole point: one flag, and the client works out the rest."""
+    _stub_flow(api, monkeypatch, [{"id": DATA_ID, "no_copy": True, "url": PLAIN_URL}])
+
+    calls = cli(["run", FLOW_ID, "--force", "--url", PRESIGNED])
+
+    _, kw = calls[0]
+    assert kw["source_data_id"] == DATA_ID
+    assert kw["trigger_url"] == PLAIN_URL  # stable: names the worker's temp file
+    assert kw["signed_url"] == PRESIGNED  # transient: what it fetches with
+
+
+def test_url_reports_which_input_it_read(cli, api, monkeypatch, capsys):
+    _stub_flow(api, monkeypatch, [{"id": DATA_ID, "no_copy": True, "url": PLAIN_URL}])
+
+    cli(["run", FLOW_ID, "--force", "--url", PRESIGNED])
+
+    out = capsys.readouterr().out
+    assert f"input {DATA_ID} read from {PLAIN_URL}" in out
+
+
+def test_an_unresolvable_url_exits_without_running(cli, api, monkeypatch, capsys):
+    _stub_flow(api, monkeypatch, [{"id": DATA_ID, "no_copy": True, "url": PLAIN_URL}])
+
+    with pytest.raises(SystemExit):
+        cli(["run", FLOW_ID, "--url", "http://minio.internal:9000/other/z.gz"])
+
+    err = capsys.readouterr().err
+    assert "matches no registered url" in err
+    assert "--source-data-id" in err
+
+
+def test_url_and_the_manual_flags_are_mutually_exclusive(cli, capsys):
+    """Both set signed_url, so accepting both would make one of them a no-op."""
+    with pytest.raises(SystemExit):
+        cli(["run", FLOW_ID, "--url", PRESIGNED, "--signed-url", PRESIGNED])
+
+    assert "supplies both" in capsys.readouterr().err
 
 
 def test_the_per_run_url_trio_is_accepted(cli):
