@@ -40,6 +40,10 @@ def main():
     run_parser = subparsers.add_parser(
         "run", help="Run an analysis flow now, on the data it already has"
     )
+    failover_parser = subparsers.add_parser(
+        "failover",
+        help="Manage the endpoints a flow falls back to when its own is offline",
+    )
     config_parser = subparsers.add_parser("configure", help="Configure the client")
     _ = subparsers.add_parser("logout", help="Log out of Globus auth")
 
@@ -178,9 +182,7 @@ def main():
         "No collection, endpoint or function is needed.",
     )
 
-    types_parser.add_argument(
-        "name", nargs="?", type=str, help="Show only this type"
-    )
+    types_parser.add_argument("name", nargs="?", type=str, help="Show only this type")
     types_parser.add_argument(
         "--remove-url",
         type=str,
@@ -214,9 +216,9 @@ def main():
         type=str,
         default=None,
         help="YAML file describing the analysis flow (endpoint_uuid, function_uuid, "
-        "policy, description, input_data, output_data, kwargs). output_data may be "
-        "omitted if the analysis stores its own results. Explicit CLI flags "
-        "override scalar values from the file.",
+        "policy, description, input_data, output_data, kwargs, failover). "
+        "output_data may be omitted if the analysis stores its own results. "
+        "Explicit CLI flags override scalar values from the file.",
     )
     register_parser.add_argument(
         "-e", "--endpoint-uuid", type=str, help="Globus Compute endpoint uuid"
@@ -289,6 +291,67 @@ def main():
     )
     run_parser.add_argument(
         "--json", action="store_true", help="Emit raw JSON instead of a summary"
+    )
+
+    failover_sub = failover_parser.add_subparsers(
+        dest="failover_command", help="Failover actions"
+    )
+    fo_list = failover_sub.add_parser("list", help="List a flow's failover endpoints")
+    fo_add = failover_sub.add_parser("add", help="Add a failover endpoint to a flow")
+    fo_rm = failover_sub.add_parser("rm", help="Remove one failover endpoint")
+    fo_status = failover_sub.add_parser(
+        "status", help="Live status of a flow's endpoint and its failovers"
+    )
+
+    for p in (fo_list, fo_add, fo_rm, fo_status):
+        p.add_argument("flow_id", type=str, help="Flow uuid (see `aero list -t flow`)")
+        p.add_argument(
+            "--json", action="store_true", help="Emit raw JSON instead of a table"
+        )
+
+    fo_add.add_argument(
+        "-e",
+        "--endpoint-uuid",
+        type=str,
+        required=True,
+        help="Globus Compute endpoint to fall back to",
+    )
+    fo_add.add_argument(
+        "-p",
+        "--priority",
+        type=int,
+        default=0,
+        help="Try order, ascending. Unique within the flow.",
+    )
+    fo_add.add_argument(
+        "-u",
+        "--function-uuid",
+        type=str,
+        default=None,
+        help="Analysis function to use on the failover endpoint. Omit to reuse "
+        "the flow's own; set it when the failover endpoint runs a different "
+        "Python minor version, since a function registered against one will not "
+        "deserialize on the other and has to be re-registered there.",
+    )
+    fo_add.add_argument(
+        "--pull-function-uuid",
+        type=str,
+        default=None,
+        help="Pull function to use on the failover endpoint (same caveat)",
+    )
+    fo_add.add_argument(
+        "--commit-function-uuid",
+        type=str,
+        default=None,
+        help="Commit function to use on the failover endpoint (same caveat)",
+    )
+    fo_add.add_argument(
+        "--disabled",
+        action="store_true",
+        help="Record the target but skip it when choosing where to run",
+    )
+    fo_rm.add_argument(
+        "failover_id", type=str, help="Failover uuid (see `aero failover list`)"
     )
 
     config_parser.add_argument(
@@ -574,6 +637,10 @@ def main():
         description = _pick("description", args.description)
         input_data = cfg.get("input_data", {})
         output_data = cfg.get("output_data", {})
+        # Endpoints to fall back to when endpoint_uuid is offline. File-only:
+        # each entry has several fields, which does not fit a scalar CLI flag.
+        # `aero failover add` attaches the same thing after registration.
+        failover = cfg.get("failover", []) or []
 
         # kwargs: start from the file, then merge in any KEY=VALUE CLI overrides.
         kwargs = dict(cfg.get("kwargs", {}) or {})
@@ -621,6 +688,7 @@ def main():
             kwargs=kwargs,
             description=description,
             policy=policy,
+            failover=failover,
         )
         print(json.dumps(result, indent=4))
 
@@ -687,6 +755,9 @@ def main():
             print(f"Submitted a run of flow {args.flow_id}.")
             if trigger_url:
                 print(f"  input {source_data_id} read from {trigger_url}")
+            if result.get("endpoint"):
+                tag = " (failover)" if result.get("failover") else ""
+                print(f"  endpoint: {result['endpoint']}{tag}")
             print(f"  last_executed: {flow.get('last_executed')}")
             print(
                 "\nSubmitted, not finished: the run is now with Globus. Watch "
@@ -701,11 +772,94 @@ def main():
             if not args.force and "no input newer than" in reason:
                 print("\nRe-run with --force to run it anyway.")
 
+    elif args.command == "failover":
+        if args.failover_command is None:
+            failover_parser.print_help()
+            return
+
+        if args.failover_command == "list":
+            from aero_client.api import list_failover
+
+            rows = list_failover(args.flow_id)
+            if args.json:
+                print(json.dumps(rows, indent=4))
+            elif not rows:
+                print(
+                    f"Flow {args.flow_id} has no failover endpoints, so its "
+                    "endpoint is never status-checked before a run."
+                )
+            else:
+                for row in rows:
+                    state = "" if row["enabled"] else "  [disabled]"
+                    print(f"{row['priority']:>4}  {row['endpoint']}{state}")
+                    print(f"      id: {row['id']}")
+                    for label, key in (
+                        ("function", "function_id"),
+                        ("pull", "pull_function_id"),
+                        ("commit", "commit_function_id"),
+                    ):
+                        if row.get(key):
+                            print(f"      {label}: {row[key]}")
+
+        elif args.failover_command == "add":
+            from aero_client.api import add_failover
+
+            row = add_failover(
+                args.flow_id,
+                args.endpoint_uuid,
+                priority=args.priority,
+                function_uuid=args.function_uuid,
+                pull_function_uuid=args.pull_function_uuid,
+                commit_function_uuid=args.commit_function_uuid,
+                enabled=not args.disabled,
+            )
+            if args.json:
+                print(json.dumps(row, indent=4))
+            else:
+                print(
+                    f"Flow {args.flow_id} will fall back to {row['endpoint']} "
+                    f"at priority {row['priority']} (id {row['id']})."
+                )
+                print(
+                    "\nCheck it is actually visible to AERO with "
+                    f"`aero failover status {args.flow_id}` -- a status of "
+                    "'unknown' means the check cannot answer and failover will "
+                    "never fire."
+                )
+
+        elif args.failover_command == "rm":
+            from aero_client.api import delete_failover
+
+            row = delete_failover(args.flow_id, args.failover_id)
+            if args.json:
+                print(json.dumps(row, indent=4))
+            else:
+                print(f"Removed failover to {row['endpoint']} from {args.flow_id}.")
+
+        elif args.failover_command == "status":
+            from aero_client.api import endpoint_status
+
+            rows = endpoint_status(args.flow_id)
+            if args.json:
+                print(json.dumps(rows, indent=4))
+            else:
+                for row in rows:
+                    state = "" if row.get("enabled", True) else "  [disabled]"
+                    print(
+                        f"{row['status']:<8} {row['role']:<9} "
+                        f"{row['endpoint']}{state}"
+                    )
+                if all(row["status"] == "unknown" for row in rows):
+                    print(
+                        "\nEvery endpoint reads 'unknown': AERO's credential "
+                        "cannot see their status, so failover will never fire. "
+                        "An endpoint's status only answers to a caller holding "
+                        "a role on it."
+                    )
+
     elif args.command == "configure":
         profile = args.profile or os.environ.get("AERO_PROFILE", "default")
-        pprint(
-            dataclasses.asdict(load_conf(args.file, update=True, profile=profile))
-        )
+        pprint(dataclasses.asdict(load_conf(args.file, update=True, profile=profile)))
 
     elif args.command == "logout":
         from aero_client.api import globus_logout
