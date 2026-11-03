@@ -138,6 +138,7 @@ def register_flow(
     timer_delay: int | None = None,
     pull_function_uuid: str | None = None,
     commit_function_uuid: str | None = None,
+    failover: list[dict] | None = None,
 ) -> None:
     """Register user function to run as a Globus Flow on remote server periodically.
 
@@ -163,6 +164,10 @@ def register_flow(
         commit_function_uuid (str | none, optional): the uuid returned when registering either `aero_client.jobs.database_commit`
             or `aero_client.jobs.commit_analysis` with Globus Compute. The function will register with GC if not provided,
             but issues may arise if local python version does not match endpoint python version. default is none.
+        failover (list[dict] | None, optional): endpoints to fall back to when `endpoint_uuid` is
+            offline, tried in ascending `priority`. Each entry takes `endpoint` and optionally
+            `priority`, `function_uuid`, `pull_function_uuid`, `commit_function_uuid` and `enabled`;
+            see `add_failover`, which attaches the same thing to an already-registered flow.
 
     Raises:
         ClientError: if function was not able to be registered as a flow, this error is raised
@@ -207,6 +212,8 @@ def register_flow(
     data["commit_function_uuid"] = commit_function_uuid
     data["flow_kwargs"] = kwargs
     data["rule"] = policy
+    if failover:
+        data["failover"] = failover
     # Only send timer when set; event-driven/analysis flows have none, and the
     # server rejects an explicit null (its default applies only when omitted).
     if timer_delay is not None:
@@ -700,6 +707,109 @@ def run_flow(
             "Content-type": "application/json",
         },
         data=json.dumps(payload),
+        verify=False,
+    )
+    if response.status_code == 200:
+        return response.json()
+    raise ClientError(response.status_code, response.content)
+
+
+def _auth_headers() -> dict:
+    return {
+        "Authorization": f"Bearer {AUTH_ACCESS_TOKEN}",
+        "Content-type": "application/json",
+    }
+
+
+def list_failover(flow_id: str) -> list[dict]:
+    """The endpoints a flow falls back to, in the order they are tried."""
+    response = requests.get(
+        build_url("flow", flow_id, "failover"), headers=_auth_headers(), verify=False
+    )
+    if response.status_code == 200:
+        return response.json()
+    raise ClientError(response.status_code, response.content)
+
+
+def add_failover(
+    flow_id: str,
+    endpoint_uuid: str,
+    priority: int = 0,
+    function_uuid: str | None = None,
+    pull_function_uuid: str | None = None,
+    commit_function_uuid: str | None = None,
+    enabled: bool = True,
+) -> dict:
+    """Add an endpoint for a flow to fall back to when its own is offline.
+
+    Before submitting a run, AERO checks whether the flow's endpoint is online
+    and, if it is explicitly offline, uses the first of these that is not.
+
+    Args:
+        flow_id (str): the AERO flow to attach this to.
+        endpoint_uuid (str): the Globus Compute endpoint to fall back to.
+        priority (int, optional): try order, ascending. Unique within the flow.
+        function_uuid (str | None, optional): the analysis function to use on the
+            failover endpoint. Leave unset to reuse the flow's own. Set it when
+            the failover endpoint runs a different Python minor version: a
+            function registered against one will not deserialize on the other,
+            so it has to be re-registered there and gets a new uuid.
+        pull_function_uuid (str | None, optional): likewise for the pull function.
+        commit_function_uuid (str | None, optional): likewise for the commit function.
+        enabled (bool, optional): False to keep the row but skip it.
+
+    Raises:
+        ClientError: on a duplicate priority (409) or an endpoint that is already
+            the flow's primary (400).
+    """
+    payload = {
+        "endpoint": str(endpoint_uuid),
+        "priority": priority,
+        "enabled": enabled,
+    }
+    for key, value in (
+        ("function_uuid", function_uuid),
+        ("pull_function_uuid", pull_function_uuid),
+        ("commit_function_uuid", commit_function_uuid),
+    ):
+        if value is not None:
+            payload[key] = str(value)
+
+    response = requests.post(
+        build_url("flow", flow_id, "failover"),
+        headers=_auth_headers(),
+        data=json.dumps(payload),
+        verify=False,
+    )
+    if response.status_code == 200:
+        return response.json()
+    raise ClientError(response.status_code, response.content)
+
+
+def delete_failover(flow_id: str, failover_id: str) -> dict:
+    """Remove one failover target. Returns the row that was removed."""
+    response = requests.delete(
+        build_url("flow", flow_id, "failover", failover_id),
+        headers=_auth_headers(),
+        verify=False,
+    )
+    if response.status_code == 200:
+        return response.json()
+    raise ClientError(response.status_code, response.content)
+
+
+def endpoint_status(flow_id: str) -> list[dict]:
+    """Live status of a flow's endpoint and each of its failovers.
+
+    Each entry is "online", "offline" or "unknown". Worth running once after
+    configuring a failover: an endpoint's status only answers to a caller
+    holding a role on it, and if AERO's credential does not, everything reads
+    "unknown" — in which case failover will never fire, because an unanswerable
+    check is not treated as "down".
+    """
+    response = requests.get(
+        build_url("flow", flow_id, "endpoint-status"),
+        headers=_auth_headers(),
         verify=False,
     )
     if response.status_code == 200:

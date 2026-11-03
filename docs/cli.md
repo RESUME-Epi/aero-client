@@ -13,6 +13,7 @@ aero [-l LEVEL] <command> [options]
 | [`create`](#aero-create) | Register a data source |
 | [`register`](#aero-register) | Register an analysis flow |
 | [`run`](#aero-run) | Run an analysis flow now, without waiting for new data |
+| [`failover`](#aero-failover) | Manage the endpoints a flow falls back to when its own is offline |
 | [`types`](#aero-types) | List notification types and their data ids |
 | [`delete-flows`](#aero-delete-flows) | Delete the flows attached to a source |
 | [`search`](#aero-search) | Query the Globus Search index |
@@ -539,6 +540,97 @@ aero run f9aaedb0-... --force \
 given with `--source-data-id`, since the server applies a url only when it knows which input it
 belongs to — a signed url on its own is accepted and then silently dropped. They cannot be combined
 with `--url`.
+
+---
+
+## `aero failover`
+
+Endpoints a flow should run on when its own Globus Compute endpoint is down.
+
+```sh
+aero failover list   <flow-id>
+aero failover add    <flow-id> -e <endpoint-uuid> [-p PRIORITY] [-u FUNCTION_UUID]
+aero failover rm     <flow-id> <failover-id>
+aero failover status <flow-id>
+```
+
+### Why
+
+Submitting a run to Globus **succeeds whether or not the compute endpoint is alive**. The run
+then fails inside Globus, long after the request returned — and because the flow's
+`last_executed` is stamped on submission rather than on success, the version that triggered it
+is now "old" and will never trigger it again. A dead endpoint produces a run that quietly never
+happened, recoverable only by someone noticing and using [`aero run --force`](#aero-run).
+
+With a failover configured, AERO checks the endpoint before submitting and, if it reports
+offline, runs the analysis elsewhere instead.
+
+### Per-flow, not per-endpoint
+
+Each flow names its own fallbacks, so two analyses on the same endpoint can fall back to
+different places — what makes a fallback valid is whether it can run *that* analysis.
+
+Targets are tried in ascending `--priority`, which must be unique within the flow. A disabled
+target (`--disabled`) is kept but skipped.
+
+### Alternate functions
+
+`-u/--function-uuid`, `--pull-function-uuid` and `--commit-function-uuid` are optional; leave
+them out and the flow's own are reused. Set them when the failover endpoint runs a **different
+Python minor version** — a function registered from one will not deserialize on the other (the
+symptom is `loss of worker 0`), so it has to be re-registered there and gets a new uuid.
+
+### At registration
+
+A `failover:` block in the [`aero register -f`](#aero-register) YAML does the same thing:
+
+```yaml
+endpoint_uuid: 7591d0fb-3d12-4ff8-b8fb-7a51146c4871
+function_uuid: ...
+failover:
+  - endpoint: 0ed1ddbc-ae82-428c-8431-989a295eaa6a
+    priority: 1
+  - endpoint: 3aa0677e-f729-45ba-895c-adc9937fb276
+    priority: 2
+    function_uuid: ...          # that endpoint is on a different python
+    pull_function_uuid: ...
+    commit_function_uuid: ...
+```
+
+### Check it works before relying on it
+
+```sh
+aero failover status f9aaedb0-...
+```
+
+```
+offline  primary   7591d0fb-3d12-4ff8-b8fb-7a51146c4871
+online   failover  0ed1ddbc-ae82-428c-8431-989a295eaa6a
+```
+
+**If every line reads `unknown`, failover will never fire.** An endpoint's status only answers
+to a caller holding a role on it; if the AERO server's credential does not, the check cannot
+answer — and an unanswerable check is deliberately not treated as "down", since a 403 or a
+timeout says nothing about the endpoint. This is the one failure mode that looks exactly like a
+working configuration.
+
+A failover endpoint also needs the same `AERO_PROFILE` in its `user_environment.yaml` and the
+same network reach to MinIO/GCS as the primary; see
+[Configuration](configuration.md). `online` means the endpoint is up, not that it can run your
+function.
+
+### Where a run went
+
+Nothing persists which endpoint a run used, so [`aero run`](#aero-run) reporting it is the
+record:
+
+```
+Submitted a run of flow f9aaedb0-....
+  endpoint: 0ed1ddbc-ae82-428c-8431-989a295eaa6a (failover)
+  last_executed: 2026-10-30T14:02:11+00:00
+```
+
+Runs triggered by a notification or an ingestion log the same thing server-side.
 
 ---
 

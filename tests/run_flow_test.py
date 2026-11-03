@@ -313,6 +313,30 @@ def test_a_submitted_run_says_so(cli, capsys):
     assert "Globus" in out
 
 
+def test_a_failover_run_names_the_endpoint_it_used(cli, capsys):
+    """Nothing persists which endpoint a run went to, so the summary is it."""
+    result = _submitted()
+    result["endpoint"] = "0ed1ddbc-ae82-428c-8431-989a295eaa6a"
+    result["failover"] = True
+
+    cli(["run", FLOW_ID, "--force"], result=result)
+
+    out = capsys.readouterr().out
+    assert "endpoint: 0ed1ddbc-ae82-428c-8431-989a295eaa6a (failover)" in out
+
+
+def test_a_primary_run_does_not_say_failover(cli, capsys):
+    result = _submitted()
+    result["endpoint"] = "7591d0fb-3d12-4ff8-b8fb-7a51146c4871"
+    result["failover"] = False
+
+    cli(["run", FLOW_ID, "--force"], result=result)
+
+    out = capsys.readouterr().out
+    assert "endpoint: 7591d0fb-3d12-4ff8-b8fb-7a51146c4871" in out
+    assert "failover" not in out
+
+
 def test_a_skipped_run_reports_the_reason_not_success(cli, capsys):
     """The server answers 200 either way, so a bare exit code says nothing."""
     cli(["run", FLOW_ID], result=_skipped())
