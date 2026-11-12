@@ -172,6 +172,64 @@ Ask for either one alone if that is all you need. With several inputs, each gets
 `lhs_input_version`, `rhs_input_version`, and so on — so a function under an `all` policy can record
 the full set of revisions it ran against, not just the one that fired the run.
 
+## Handing a failed run to the failover endpoint
+
+AERO's [failover](cli.md#aero-failover) moves a run off an endpoint that reports offline *before*
+the run starts. It cannot see a run that reaches a healthy endpoint and then fails there — an
+analysis that submits a job to an HPC cluster, say, and watches the job die. The analysis can see
+that, and can ask AERO to run the flow again on the next failover endpoint.
+
+Declare an `aero_run` parameter. It is opt-in like the other extras, and carries where this run
+is and what it consumed. Pass it unchanged to `request_failover` when the job fails:
+
+```python
+def run_model(track, aero_run):
+    from aero_client.failover import request_failover
+
+    job_id = submit(track)                 # qsub, sbatch, ...
+    state = wait_for(job_id)
+    if state != "SUCCESS":
+        request_failover(aero_run, reason=f"PBS job {job_id} {state}")
+
+    return AeroOutput(name="output", path="result.nc")
+```
+
+**`request_failover` always raises** `FailoverRequested`, whether or not AERO started a re-run.
+The failed run has to stop there: returning normally would send the commit step on to record a
+run that produced nothing. The Globus run shows as failed, with a message saying where the
+re-run went, or why there was none. Catch it only to clean up, then re-raise.
+
+The re-run:
+
+- **skips the endpoint this run is on**, and every endpoint earlier runs in the chain failed on.
+  The candidates are the flow's own endpoint, then its failovers in priority order. Any that
+  reports offline is skipped too.
+- **processes the same input versions** this run did, even if a newer version has arrived since.
+- **can fail over again.** If it fails too and calls `request_failover`, the chain moves on to
+  the next endpoint. When none is left, AERO declines, and the chain ends instead of looping.
+- **is always forced.** The failed run has already marked its inputs as processed.
+
+`aero_run` is a dict, should you want to log it:
+
+| Key | |
+|---|---|
+| `flow_id` | the AERO flow this run belongs to |
+| `endpoint` | the Globus Compute endpoint running it |
+| `tried_endpoints` | endpoints earlier runs in this chain failed on |
+| `input_versions` | each input's data id → the version id this run consumed |
+
+Before relying on it:
+
+- The flow needs a failover. Run `aero failover add`, then check it with
+  `aero failover status`.
+- Both endpoints need an `aero_client` new enough to have `aero_client.failover`.
+- Re-register the function, so that it picks up the wrapper that passes `aero_run`.
+- A no-copy input in a private bucket survives a re-run only if it is marked `fetch: false`. The
+  re-run gets no fresh presigned URL, so the function has to fetch the input with its own
+  credentials.
+
+To do the same thing by hand, use `aero failover run <flow-id>`.
+
 ## Accepting a path or a URL
 
 A function that also runs by hand is easier to test. `pandas` reads URLs directly, so accepting

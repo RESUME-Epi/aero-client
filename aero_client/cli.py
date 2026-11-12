@@ -302,8 +302,11 @@ def main():
     fo_status = failover_sub.add_parser(
         "status", help="Live status of a flow's endpoint and its failovers"
     )
+    fo_run = failover_sub.add_parser(
+        "run", help="Run an analysis flow now, on a failover instead of its own endpoint"
+    )
 
-    for p in (fo_list, fo_add, fo_rm, fo_status):
+    for p in (fo_list, fo_add, fo_rm, fo_status, fo_run):
         p.add_argument("flow_id", type=str, help="Flow uuid (see `aero list -t flow`)")
         p.add_argument(
             "--json", action="store_true", help="Emit raw JSON instead of a table"
@@ -352,6 +355,19 @@ def main():
     )
     fo_rm.add_argument(
         "failover_id", type=str, help="Failover uuid (see `aero failover list`)"
+    )
+    fo_run.add_argument(
+        "-x",
+        "--exclude",
+        type=str,
+        action="append",
+        default=[],
+        metavar="ENDPOINT",
+        help="Also skip this failover endpoint (repeatable). The flow's own "
+        "endpoint is always skipped.",
+    )
+    fo_run.add_argument(
+        "--reason", type=str, default=None, help="Why, for the server log"
     )
 
     config_parser.add_argument(
@@ -856,6 +872,28 @@ def main():
                         "An endpoint's status only answers to a caller holding "
                         "a role on it."
                     )
+
+        elif args.failover_command == "run":
+            from aero_client.api import run_failover
+
+            result = run_failover(
+                args.flow_id, exclude_endpoints=args.exclude, reason=args.reason
+            )
+            if args.json:
+                print(json.dumps(result, indent=4))
+            elif result.get("submitted"):
+                flow = result.get("flow") or {}
+                tag = " (failover)" if result.get("failover") else ""
+                print(f"Submitted a run of flow {args.flow_id}.")
+                print(f"  endpoint: {result.get('endpoint')}{tag}")
+                print(f"  last_executed: {flow.get('last_executed')}")
+                print(
+                    "\nSubmitted, not finished: the run is now with Globus. Watch "
+                    "for the output version with `aero list -i <output data id>`."
+                )
+            else:
+                print(f"Nothing was submitted for flow {args.flow_id}.")
+                print(f"  {result.get('reason') or ''}")
 
     elif args.command == "configure":
         profile = args.profile or os.environ.get("AERO_PROFILE", "default")

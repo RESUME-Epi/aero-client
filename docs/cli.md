@@ -552,6 +552,7 @@ aero failover list   <flow-id>
 aero failover add    <flow-id> -e <endpoint-uuid> [-p PRIORITY] [-u FUNCTION_UUID]
 aero failover rm     <flow-id> <failover-id>
 aero failover status <flow-id>
+aero failover run    <flow-id> [-x ENDPOINT ...] [--reason TEXT]
 ```
 
 ### Why
@@ -631,6 +632,22 @@ Submitted a run of flow f9aaedb0-....
 ```
 
 Runs triggered by a notification or an ingestion log the same thing server-side.
+
+### Running on a failover by hand
+
+```sh
+aero failover run f9aaedb0-... --reason "primary is in maintenance"
+```
+
+Runs the flow now on its first failover that does not report offline, whether or not the
+primary is up. Add `-x/--exclude ENDPOINT` (repeatable) to skip particular failovers as well.
+The run is always forced, like `aero run --force`, and processes each input's latest version.
+When every failover is excluded or offline, nothing is submitted and the command says so.
+
+An analysis can do the same from inside a run that has failed on a healthy endpoint, such as a
+cluster job that died. It calls `aero_client.failover.request_failover`, which also skips every
+endpoint already tried and re-runs the same input versions. See
+[Handing a failed run to the failover endpoint](writing-functions.md#handing-a-failed-run-to-the-failover-endpoint).
 
 ---
 

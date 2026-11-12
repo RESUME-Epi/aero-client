@@ -440,6 +440,22 @@ def aero_format(fn: callable):
         aero_args = kwargs.pop("aero")
         fn_in.update(**kwargs)
 
+        # Where this run is and what it consumed, for a function that may need
+        # to hand the run on to a failover endpoint (see
+        # aero_client.failover.request_failover). The server puts the endpoint
+        # and the tried list in `run`; an older server sends neither.
+        run = aero_args.get("run") or {}
+        extra_in["aero_run"] = {
+            "flow_id": aero_args.get("flow_id"),
+            "endpoint": run.get("endpoint"),
+            "tried_endpoints": list(run.get("tried_endpoints") or []),
+            "input_versions": {
+                val["id"]: val["version_id"]
+                for val in (aero_args.get("input_data") or {}).values()
+                if val.get("id") and val.get("version_id")
+            },
+        }
+
         # Inputs the function fetches itself: the url replaces the path it would
         # otherwise have received, so it is not optional.
         fn_in.update(direct_in)
