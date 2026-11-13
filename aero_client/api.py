@@ -817,6 +817,43 @@ def endpoint_status(flow_id: str) -> list[dict]:
     raise ClientError(response.status_code, response.content)
 
 
+def run_failover(
+    flow_id: str,
+    exclude_endpoints: list[str] | None = None,
+    reason: str | None = None,
+) -> dict:
+    """Run an analysis flow now, somewhere other than its own endpoint.
+
+    The by-hand counterpart of `aero_client.failover.request_failover`, which an
+    analysis calls from inside a run that failed. The run goes to the flow's
+    first failover that is not excluded and does not report offline. It is
+    always forced, and processes each input's latest version.
+
+    Args:
+        flow_id (str): the AERO flow to run.
+        exclude_endpoints (list[str] | None, optional): endpoints to skip as well
+            as the flow's own primary, which is always skipped.
+        reason (str | None, optional): why, for the server log.
+
+    Returns:
+        dict: `submitted`, `reason` (why not, when not), `endpoint`, `failover`
+        and `flow`. Nothing left to try is `submitted: false`, not an error.
+    """
+    payload = {"tried_endpoints": [str(e) for e in exclude_endpoints or []]}
+    if reason:
+        payload["reason"] = reason
+
+    response = requests.post(
+        build_url("flow", flow_id, "failover", "run"),
+        headers=_auth_headers(),
+        data=json.dumps(payload),
+        verify=False,
+    )
+    if response.status_code == 200:
+        return response.json()
+    raise ClientError(response.status_code, response.content)
+
+
 # TODO: Fix bug where it'll request to login if tokens are not present
 def globus_logout():
     """Remove the Globus Auth token file to invoke login on next API access."""
