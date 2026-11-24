@@ -6,16 +6,16 @@ Globus credentials in the environment.
 
 ## config.toml
 
-Two formats are accepted. **Profiles** are preferred: one table per environment, selected by name,
-so a single file can hold production and test settings.
+The `config.toml` can contain multiple **profiles**, one table per environment, selected by names so a single file can hold production and test settings, 
+for example.
 
 ```toml
 # config.toml
 [default]
 client_uuid      = "32aa2afb-8f11-4012-8bb3-c18329d815db"
 portal_client_id = "7408753c-04de-42b9-8ca3-3db94cd2a848"
-server           = "https://aero.cels.anl.gov/fhwa"
-cache_dir        = "~/.local/share/fhwa_aero"
+server           = "https://aero.foo.edu"
+cache_dir        = "~/.local/share/aero_production"
 
 [testing]
 client_uuid      = "32aa2afb-8f11-4012-8bb3-c18329d815db"
@@ -30,29 +30,12 @@ These are **two different Globus applications**, both registered through the
 | Key | Meaning |
 |---|---|
 | `client_uuid` | The **thick client** — the application this CLI authenticates *as*. You create it yourself; it is the identity that ends up holding transfer tokens and needing access to collections. |
-| `portal_client_id` | The **AERO server portal** — the resource server this client requests a scope *on*. It must match the `PORTAL_CLIENT_ID` the AERO server runs with, because the `action_all` scope the client asks for is derived from it. Ask whoever operates the server. |
+| `portal_client_id` | The **AERO server portal** — the resource server this client requests a scope *on*. It must match the `PORTAL_CLIENT_ID` the AERO server runs with, because the `action_all` scope the client asks for is derived from it. |
 | `server` | Base URL of the AERO server, including any path prefix (`/fhwa`, `/aero-testing`). |
 | `cache_dir` | Where the client keeps its tokens and a copy of this file. |
 
-!!! warning
 
-    Some deployments register a single Globus application and use its UUID for both, which makes
-    them look interchangeable. They are not — a client pointed at the wrong `portal_client_id` will
-    request a scope the server does not accept, and every call will fail authorization.
-
-The **legacy format** — top-level keys plus an `[aero]` table — is still read, as the `default`
-profile:
-
-```toml
-client_uuid = "32aa2afb-8f11-4012-8bb3-c18329d815db"
-portal_client_id = "7408753c-04de-42b9-8ca3-3db94cd2a848"
-
-[aero]
-  cache_dir = "~/.local/share/fhwa_aero"
-  server = "https://aero.cels.anl.gov/fhwa"
-```
-
-### Applying it
+### Applying the configuration
 
 ```sh
 aero configure -f config.toml              # the [default] profile
@@ -129,12 +112,6 @@ from aero_client.utils import get_transfer_token
 get_transfer_token("<collection_uuid>")
 ```
 
-Then grant the **thick client** permission on that collection — it is the identity that performs
-the transfer. Globus expects it as an email-shaped principal built from `client_uuid`:
-
-```
-<client_uuid>@clients.auth.globus.org
-```
 
 **No-copy sources skip all of this** — nothing is staged, so no collection and no transfer token
 are involved.

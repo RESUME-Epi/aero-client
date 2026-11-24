@@ -1,6 +1,6 @@
 site_name: Aero-Client
-repo_name: NSF-RESUME/aero-client
-repo_url: https://github.com/NSF-RESUME/aero-client
+repo_name: RESUME-Epi/aero-client
+repo_url: https://github.com/RESUME-Epi/aero-client
 
 
 nav:
@@ -8,7 +8,9 @@ nav:
   - Getting Started:
     - Configuration: configuration.md
     - Writing Functions: writing-functions.md
+    - Examples: examples.md
   - CLI Reference: cli.md
+  - YAML Reference: yaml-reference.md
   - References: docs/
 
 
