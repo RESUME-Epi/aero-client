@@ -46,8 +46,8 @@ aero list -t prov            # provenance records
 aero list -i <data-id>       # every version of one source
 ```
 
-`-t/--type` and `-i/--id` are mutually exclusive. Output is JSON, paged — press Enter for the next
-page, Ctrl-D to stop.
+`-t/--type` and `-i/--id` are mutually exclusive. Output is JSON. Listing by type is paged — press
+Enter for the next page, Ctrl-D to stop; `-i` prints every version at once.
 
 Listing versions of a source is how you check that an ingestion actually produced something:
 
@@ -201,9 +201,8 @@ description: MinIO traffic report objects, tracked by reference
 no_copy: true
 ```
 
-A timer-driven source, which does pull and therefore does need a collection and an endpoint:
-
-A timer-driven source with a verifier. Note `name` matches the function's parameter, and the
+A timer-driven source with a verifier, which does pull and therefore does need a collection and an
+endpoint. Note `name` matches the function's parameter, and the
 readable label lives in `description`:
 
 ```yaml title="timed-source.yaml"
@@ -232,7 +231,8 @@ aero create -f timed-source.yaml -k bin_freq=1min # ...and kwargs, merged over t
 ```
 
 Accepted keys: `name`, `url`, `collection_uuid`, `collection_url`, `endpoint_uuid`, `description`,
-`verifier` (or `function_uuid`), `type`, `no_copy`, `policy`, `timer`, `kwargs`.
+`verifier` (or `function_uuid`), `type`, `no_copy`, `policy`, `timer`, `kwargs`. See the
+[YAML reference](yaml-reference.md#source-file-aero-create) for what each one does.
 
 Values given as `-k KEY=VALUE` arrive as **strings**; use the YAML `kwargs` block when a
 parameter needs a number or a boolean.
@@ -292,7 +292,8 @@ aero register -f analysis.yaml -p ALL -k threshold=0.5
 ```
 
 Accepted keys: `endpoint_uuid`, `function_uuid`, `description`, `policy`, `input_data`,
-`output_data`, `kwargs`.
+`output_data`, `kwargs`, [`failover`](#at-registration). See the
+[YAML reference](yaml-reference.md#flow-file-aero-register) for what each one does.
 
 Each **`input_data` entry** accepts `id` (required), `version`, and
 [`fetch`](#fetching-an-input-yourself). Each **`output_data` entry** accepts `collection_uuid` and
@@ -554,6 +555,18 @@ aero failover rm     <flow-id> <failover-id>
 aero failover status <flow-id>
 aero failover run    <flow-id> [-x ENDPOINT ...] [--reason TEXT]
 ```
+
+| Flag | Subcommand | |
+|---|---|---|
+| `-e, --endpoint-uuid` | `add` | Globus Compute endpoint to fall back to. Required |
+| `-p, --priority` | `add` | Try order, ascending, unique within the flow. Defaults to `0` |
+| `-u, --function-uuid` | `add` | Analysis function to use there; see [alternate functions](#alternate-functions) |
+| `--pull-function-uuid` | `add` | Pull function to use there |
+| `--commit-function-uuid` | `add` | Commit function to use there |
+| `--disabled` | `add` | Record the target but skip it when choosing where to run |
+| `-x, --exclude ENDPOINT` | `run` | Also skip this failover endpoint (repeatable) |
+| `--reason` | `run` | Why, for the server log |
+| `--json` | all | Emit the raw server response instead of a table |
 
 ### Why
 
