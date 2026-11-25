@@ -546,7 +546,8 @@ with `--url`.
 
 ## `aero failover`
 
-Endpoints a flow should run on when its own Globus Compute endpoint is down.
+Endpoints a flow should run on when its own Globus Compute endpoint is down. For how failover
+behaves and how to prepare an endpoint for it, see [Endpoint failover](failover.md).
 
 ```sh
 aero failover list   <flow-id>

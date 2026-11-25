@@ -74,6 +74,8 @@ to see sources, versions and flows, and [`aero run`](cli.md#aero-run) to run a f
 | [YAML reference](yaml-reference.md) | Every key the `aero create` and `aero register` files accept |
 | [Writing functions](writing-functions.md) | What your ingestion and analysis functions must look like |
 | [Examples](examples.md) | Worked examples: a wastewater CSV copied by AERO, and no-copy files in an S3 bucket |
+| [How flows run](how-flows-run.md) | How flows connect through shared data, and what happens when a source changes |
+| [Endpoint failover](failover.md) | Running a flow elsewhere when its endpoint is down or a run fails |
 
 ## Concepts
 
