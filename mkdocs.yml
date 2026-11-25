@@ -9,6 +9,8 @@ nav:
     - Configuration: configuration.md
     - Writing Functions: writing-functions.md
     - Examples: examples.md
+    - How Flows Run: how-flows-run.md
+    - Endpoint Failover: failover.md
   - CLI Reference: cli.md
   - YAML Reference: yaml-reference.md
   - References: docs/
